@@ -5,7 +5,7 @@ from __future__ import annotations
 from dataclasses import dataclass
 from typing import Optional
 
-from .bronto import BrontoPricing, BrontoProjection
+from .bronto import BrontoPricing, BrontoProjection, TB_TO_GB
 from .cost_explorer import CostReport
 from .org import Account
 
@@ -71,6 +71,13 @@ def render(
         f"- **Projected Bronto spend (same volume, {projection.cheapest_plan} plan):** "
         f"{_usd(bronto_total)}"
     )
+    if projection.gb_searched > 0:
+        ingest_cost = projection.plan_ingest_costs.get(projection.cheapest_plan, 0.0)
+        search_cost = projection.plan_search_costs.get(projection.cheapest_plan, 0.0)
+        lines.append(
+            f"  - Ingest: {_usd(ingest_cost)} ({projection.gb_ingested:,.1f} GB) · "
+            f"Search: {_usd(search_cost)} ({projection.gb_searched:,.1f} GB scanned)"
+        )
     if obs_total > 0:
         lines.append(f"- **Projected savings:** {_usd(savings)} ({savings_pct})")
     if s3_unattr > 0:
@@ -216,9 +223,15 @@ def render(
     lines.append("## Bronto Projection Detail")
     lines.append("")
     lines.append(
-        f"_Total ingested volume (from Cost Explorer usage meters): "
+        f"_Ingest volume (CW Logs, custom Metrics, Metric Streams, X-Ray, "
+        f"AMP, CloudTrail data events, OpenSearch when probed): "
         f"**{projection.gb_ingested:,.1f} GB** over {window_days} days._"
     )
+    if projection.gb_searched > 0:
+        lines.append(
+            f"_Search/scan volume (CW Logs Insights `DataScanned-Bytes`): "
+            f"**{projection.gb_searched:,.1f} GB** over {window_days} days._"
+        )
     lines.append("")
     if projection.per_source_gb:
         lines.append("| Source | GB ingested |")
@@ -226,17 +239,36 @@ def render(
         for src, gb in sorted(projection.per_source_gb.items(), key=lambda kv: kv[1], reverse=True):
             lines.append(f"| {src} | {gb:,.1f} |")
         lines.append("")
-    lines.append("| Plan | Monthly fee | Included | Overage rate | Projected total |")
-    lines.append("| --- | ---: | ---: | ---: | ---: |")
+    lines.append(
+        "| Plan | Monthly fee | Included ingest | Search allowance | "
+        "Ingest cost | Search cost | Total |"
+    )
+    lines.append("| --- | ---: | ---: | ---: | ---: | ---: | ---: |")
     for plan in pricing.plans:
         name = plan["name"]
         fee = float(plan["monthly_fee_usd"])
         inc = float(plan["included_tb"])
-        cost = projection.plan_costs.get(name, 0.0)
+        ingest_cost = projection.plan_ingest_costs.get(name, 0.0)
+        search_cost = projection.plan_search_costs.get(name, 0.0)
+        total = projection.plan_costs.get(name, 0.0)
+        allowance_gb = projection.plan_search_allowance_gb.get(name, 0.0)
+        if "search_multiplier_of_ingest" in plan:
+            allowance_label = (
+                f"{plan['search_multiplier_of_ingest']}× ingest "
+                f"({allowance_gb / TB_TO_GB:,.1f} TB)"
+            )
+        else:
+            allowance_label = f"{allowance_gb / TB_TO_GB:,.0f} TB"
         cheapest = " ←" if name == projection.cheapest_plan else ""
         lines.append(
-            f"| {name}{cheapest} | {_usd(fee)} | {inc} TB/mo | "
-            f"${pricing.ingest_per_gb_usd:.2f}/GB | {_usd(cost)} |"
+            f"| {name}{cheapest} | {_usd(fee)} | {inc} TB/mo | {allowance_label} | "
+            f"{_usd(ingest_cost)} | {_usd(search_cost)} | {_usd(total)} |"
+        )
+    if projection.gb_searched > 0:
+        lines.append("")
+        lines.append(
+            f"_Search overage: ${pricing.search_per_gb_usd * 1024:.0f}/TB on all "
+            f"plans once the included allowance is exceeded._"
         )
     lines.append("")
 
@@ -258,7 +290,11 @@ def render(
         "EBS volumes for OpenSearch nodes — show up as AWS spend with no Bronto "
         "counterpart, which is why the projected savings can look large."
     )
-    lines.append("- Bronto search pricing is excluded from this projection per spec.")
+    lines.append(
+        "- Bronto search inclusion varies per plan: Starter bundles 20 TB, "
+        "Pro bundles 500 TB, Enterprise scales as 100× the customer's actual "
+        "ingested volume. Overage on any plan is $1/TB."
+    )
     if projection.extended_retention_note:
         lines.append(f"- {projection.extended_retention_note}")
     lines.append(

@@ -1,6 +1,6 @@
 # Bronto.io rate card — source: https://bronto.io/pricing (verified 2026-05-28).
-# Pricing is uniform across logs, metrics, and traces — Bronto charges by volume.
-# Search is excluded from this projection per request.
+# Ingest pricing is uniform across logs, metrics, and traces. Search is
+# included on every plan with overage at $1/TB.
 
 ingest_per_gb_usd: 0.10
 included_retention_months: 12
@@ -9,19 +9,27 @@ included_retention_months: 12
 # instead of a number. Set to a per-GB-month rate if you have a quote.
 extended_retention_per_gb_month_usd: null
 
-# Search is excluded from this comparison.
-search_per_gb_usd: 0.0
+# Search overage rate ($1/TB = $0.001/GB) applied uniformly once a plan's
+# included search allowance is exceeded.
+search_per_gb_usd: 0.001
 
 plans:
+  # Starter: 20 TB search included flat.
   - name: starter
     monthly_fee_usd: 25
     included_tb: 1
+    search_included_tb: 20
+  # Pro: 100 × the 5 TB ingest tier = 500 TB search included flat.
   - name: pro
     monthly_fee_usd: 500
     included_tb: 5
+    search_included_tb: 500
+  # Enterprise: per-GB ingest; search scales as 100 × the customer's
+  # actual ingested volume in the same window.
   - name: enterprise
     monthly_fee_usd: 0
-    included_tb: 0   # pure per-GB
+    included_tb: 0
+    search_multiplier_of_ingest: 100
 
 # Volume conversion assumptions used when AWS reports counts instead of bytes.
 bytes_per_xray_trace: 2048          # 2 KB / trace
@@ -32,6 +40,11 @@ bytes_per_cloudtrail_event: 1536    # 1.5 KB / event
 # ~80 bytes/datapoint serialized → ~3.4 MB / metric-month. Tune for your
 # resolution (5-min = 8,640 datapoints = ~700 KB).
 bytes_per_metric_month: 3_440_000
+
+# CloudWatch Metric Streams forwards each metric update (data point) to a
+# destination (typically Firehose). Each update carries metric name,
+# namespace, dimensions, timestamp, and value — ~80 bytes serialized.
+bytes_per_metric_stream_update: 80
 
 # OpenSearch monthly ingest is estimated from provisioned storage divided
 # by an assumed retention. AWS doesn't expose ingest bytes directly via CE.

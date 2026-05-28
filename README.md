@@ -3,8 +3,14 @@
 A Python CLI that walks your AWS Organization, totals every dollar AWS bills
 for observability (CloudWatch, X-Ray, AMP/AMG, OpenSearch, VPC Flow Logs,
 CloudTrail data events, plus S3 log sinks), then projects what the same
-ingested volume would cost on [Bronto.io](https://bronto.io/pricing) at
-$0.10/GB ingest with 12-month retention bundled. Search pricing is excluded.
+ingested volume would cost on [Bronto.io](https://bronto.io/pricing):
+$0.10/GB ingest with 12-month retention bundled, plus per-plan search
+allowances (Starter 20 TB / Pro 500 TB / Enterprise 100× ingest) with
+$1/TB overage.
+
+> Looking for a stripped-down sibling that just reads the Cost Explorer
+> bill — no probes, no regional walks? See
+> [aws-observability-bill-vs-bronto](https://github.com/BrontoStephen/aws-observability-bill-vs-bronto).
 
 ## Install
 
@@ -100,6 +106,37 @@ The report includes:
 - **Bronto projection detail** across all three plans (Starter, Pro, Enterprise)
 - **Caveats** — S3 attribution, retention assumptions, etc.
 
+## What it counts as Bronto ingest
+
+| Source | Cost Explorer usage type | How GB is derived |
+| --- | --- | --- |
+| CloudWatch Logs — customer | `DataProcessing-Bytes` | Direct (GB) |
+| CloudWatch Logs — vended | `VendedLog-Bytes` | Direct (GB) — ALB, CloudFront, Route 53, etc. |
+| CloudWatch Logs Insights (search) | `DataScanned-Bytes` | Direct (GB) — counted toward Bronto search |
+| CloudWatch custom metrics | `MetricMonitorUsage` | metric-months × bytes/metric-month |
+| CloudWatch Metric Streams | `MetricStreamUsage` | updates × bytes/update |
+| X-Ray | `TracesRecorded` | traces × bytes/trace |
+| Managed Prometheus | `IngestedSamples` | samples × bytes/sample |
+| CloudTrail data events | `PaidEventsRecorded` | events × bytes/event |
+| OpenSearch | (via `--probe`) | storage ÷ retention assumption |
+
+All bytes-per-unit assumptions live in
+[config/bronto_pricing.yaml](config/bronto_pricing.yaml).
+
+### Bronto pricing model
+
+- **Ingest:** $0.10/GB, uniform across logs/metrics/traces.
+- **Retention:** 12 months included on all plans.
+- **Search:** included on every plan, overage at $1/TB:
+
+  | Plan | Monthly fee | Ingest included | Search included |
+  | --- | --- | --- | --- |
+  | Starter | $25 | 1 TB | 20 TB flat |
+  | Pro | $500 | 5 TB | 500 TB flat (100 × ingest tier) |
+  | Enterprise | per-GB | — | 100 × actual ingested volume |
+
+  Projector picks the cheapest total (ingest + search) and shows all three side by side.
+
 ## Notes & caveats
 
 - **S3 attribution.** With `--probe`, the script walks every log-producing
@@ -108,17 +145,13 @@ The report includes:
   bucket → source map. Buckets without a confirmed source are reported as
   "suspected" by name match only — useful for spotting omissions but not
   authoritative. Bucket sizes are pulled from CloudWatch `BucketSizeBytes`.
-- **Bronto savings can look large.** Bronto only charges for ingested
-  bytes — not alarm hours, dashboards, API requests, retention storage
-  beyond 12 months, or OpenSearch node EBS. AWS charges that have no
-  Bronto counterpart show up as net savings even though Bronto isn't
-  "doing less" — it just bills differently.
-- **CloudWatch Metrics conversion** assumes ~3.4 MB/metric-month
-  (1-minute resolution × 80 bytes/datapoint). Tune `bytes_per_metric_month`
-  in `config/bronto_pricing.yaml` for your actual resolution.
+- **Bronto savings can look large.** Bronto charges for ingested bytes
+  (and search overage) — not alarm hours, dashboards, API requests,
+  retention storage beyond 12 months, or OpenSearch node EBS. AWS
+  charges that have no Bronto counterpart show up as net savings even
+  though Bronto isn't "doing less" — it just bills differently.
 - **OpenSearch ingest** is estimated from provisioned storage ÷
   `opensearch_retention_months_assumption` (default 1 month). Tune for
   your real index retention.
-- **Bronto search pricing** is excluded per spec.
 - **Extended retention** beyond 12 months is "contact sales" on Bronto,
   so it's footnoted rather than estimated.

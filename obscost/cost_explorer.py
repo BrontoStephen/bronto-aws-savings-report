@@ -72,14 +72,17 @@ def _classify(service: str, usage_type: str) -> str:
 
     # CloudWatch sub-buckets — usage-type strings are surprisingly varied.
     u = ut.lower()
+    # Order matters: Insights (DataScanned-Bytes) must be checked before
+    # the generic Logs check, otherwise the "log" substring in the prefix
+    # would steal it.
+    if "datascanned" in u or "queryscanned" in u or "insight" in u:
+        return "CloudWatch Insights"
     if "logs" in u or "log-" in u or "vpcflowlog" in u or "dataprocessing-bytes" in u:
         return "CloudWatch Logs"
     if "alarm" in u:
         return "CloudWatch Alarms"
     if "dashboard" in u:
         return "CloudWatch Dashboards"
-    if "insight" in u or "queryscanned" in u:
-        return "CloudWatch Insights"
     if "canary" in u or "synthetic" in u:
         return "CloudWatch Synthetics"
     if "metric" in u or "request" in u or "cw:metricmonitor" in u:
