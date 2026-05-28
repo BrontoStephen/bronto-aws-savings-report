@@ -63,9 +63,23 @@ def render(
     )
     lines.append("")
 
+    # Lead with the savings — most readers want this first.
+    if obs_total > 0:
+        lines.append(
+            f"> **Projected savings: {savings_pct} ({_usd(savings)} over "
+            f"{window_days} days)** — switching to Bronto.io would cost "
+            f"{_usd(bronto_total)} vs {_usd(obs_total)} on AWS."
+        )
+        lines.append("")
+
     # Executive summary
     lines.append("## Executive Summary")
     lines.append("")
+    if obs_total > 0:
+        lines.append(
+            f"- **Projected savings:** **{savings_pct}** "
+            f"({_usd(savings)} over {window_days} days)"
+        )
     lines.append(f"- **Total AWS observability spend ({window_days}d):** {_usd(obs_total)}")
     lines.append(
         f"- **Projected Bronto spend (same volume, {projection.cheapest_plan} plan):** "
@@ -86,8 +100,6 @@ def render(
             f"Metrics {sig.get('metrics', 0):,.1f} GB · "
             f"Traces {sig.get('traces', 0):,.1f} GB"
         )
-    if obs_total > 0:
-        lines.append(f"- **Projected savings:** {_usd(savings)} ({savings_pct})")
     if s3_unattr > 0:
         lines.append(
             f"- _S3 (unattributed) spend in the same window: {_usd(s3_unattr)} — "
