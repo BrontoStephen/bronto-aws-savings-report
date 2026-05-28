@@ -1,0 +1,233 @@
+"""Markdown report renderer."""
+
+from __future__ import annotations
+
+from dataclasses import dataclass
+from typing import Optional
+
+from .bronto import BrontoPricing, BrontoProjection
+from .cost_explorer import CostReport
+from .org import Account
+
+
+def _usd(x: float) -> str:
+    return f"${x:,.2f}"
+
+
+def _pct(x: float, total: float) -> str:
+    if total <= 0:
+        return "0.0%"
+    return f"{(x / total) * 100:.1f}%"
+
+
+@dataclass
+class ProbeBundle:
+    """All optional probe results bundled together. Any field may be None
+    if that probe wasn't run or had no results."""
+
+    cloudwatch_logs: Optional[object] = None
+    cloudwatch_metrics: Optional[object] = None
+    xray: Optional[object] = None
+    amp: Optional[object] = None
+    amg: Optional[object] = None
+    opensearch: Optional[object] = None
+    vpc_flow_logs: Optional[object] = None
+    cloudtrail: Optional[object] = None
+    s3_log_sinks: Optional[object] = None
+
+
+def render(
+    *,
+    report: CostReport,
+    accounts: list[Account],
+    skipped: list[tuple[str, str]],
+    projection: BrontoProjection,
+    pricing: BrontoPricing,
+    mgmt_account_id: str,
+    probes: Optional[ProbeBundle] = None,
+) -> str:
+    obs_total = report.total(include_s3_unattributed=False)
+    s3_unattr = report.by_bucket().get("S3 (unattributed)", 0.0)
+    bronto_total = projection.cheapest_cost
+    savings = obs_total - bronto_total
+    savings_pct = _pct(savings, obs_total) if obs_total > 0 else "n/a"
+    window_days = max(int(round(projection.months_in_window * 30.4375)), 1)
+
+    lines: list[str] = []
+    lines.append("# AWS Observability Cost Audit")
+    lines.append("")
+    lines.append(f"_Window: {report.start} → {report.end} ({window_days} days)_")
+    lines.append(
+        f"_Management account: {mgmt_account_id} — accounts scanned: {len(accounts)}"
+        f"{f' (skipped: {len(skipped)})' if skipped else ''}_"
+    )
+    lines.append("")
+
+    # Executive summary
+    lines.append("## Executive Summary")
+    lines.append("")
+    lines.append(f"- **Total AWS observability spend ({window_days}d):** {_usd(obs_total)}")
+    lines.append(
+        f"- **Projected Bronto spend (same volume, {projection.cheapest_plan} plan):** "
+        f"{_usd(bronto_total)}"
+    )
+    if obs_total > 0:
+        lines.append(f"- **Projected savings:** {_usd(savings)} ({savings_pct})")
+    if s3_unattr > 0:
+        lines.append(
+            f"- _S3 (unattributed) spend in the same window: {_usd(s3_unattr)} — "
+            "not included in totals above; run with `--probe` to attribute log-sink buckets._"
+        )
+    lines.append("")
+
+    # Spend by bucket
+    lines.append("## Spend by Service")
+    lines.append("")
+    lines.append("| Service / Bucket | Spend | % of obs total |")
+    lines.append("| --- | ---: | ---: |")
+    by_bucket = report.by_bucket()
+    for bucket, amt in sorted(by_bucket.items(), key=lambda kv: kv[1], reverse=True):
+        if bucket == "S3 (unattributed)":
+            continue
+        lines.append(f"| {bucket} | {_usd(amt)} | {_pct(amt, obs_total)} |")
+    if s3_unattr > 0:
+        lines.append(f"| _S3 (unattributed)_ | _{_usd(s3_unattr)}_ | _(excluded)_ |")
+    lines.append(f"| **Total** | **{_usd(obs_total)}** | **100.0%** |")
+    lines.append("")
+
+    # Spend by account
+    lines.append("## Spend by Account")
+    lines.append("")
+    lines.append("| Account ID | Name | Spend |")
+    lines.append("| --- | --- | ---: |")
+    by_account = report.by_account()
+    name_by_id = {a.id: a.name for a in accounts}
+    for acct_id, amt in sorted(by_account.items(), key=lambda kv: kv[1], reverse=True):
+        if acct_id == "*":
+            continue
+        lines.append(f"| {acct_id} | {name_by_id.get(acct_id, '?')} | {_usd(amt)} |")
+    lines.append("")
+
+    if skipped:
+        lines.append("### Accounts skipped")
+        lines.append("")
+        for acct_id, reason in skipped:
+            lines.append(f"- `{acct_id}` — {reason}")
+        lines.append("")
+
+    # Volume & retention from probes
+    if probes is not None:
+        lines.append("## Volume & Retention (from --probe)")
+        lines.append("")
+        if probes.cloudwatch_logs is not None:
+            p = probes.cloudwatch_logs
+            gb = p.stored_bytes / (1024 ** 3)
+            lines.append(
+                f"- **CloudWatch Logs:** {p.group_count:,} groups, "
+                f"{gb:,.1f} GB stored, "
+                f"{p.groups_never_expire:,} with no retention policy."
+            )
+            if p.retention_histogram:
+                hist = ", ".join(f"{k}: {v}" for k, v in sorted(p.retention_histogram.items()))
+                lines.append(f"  - Retention histogram: {hist}")
+        if probes.cloudwatch_metrics is not None:
+            p = probes.cloudwatch_metrics
+            lines.append(
+                f"- **CloudWatch Metrics:** {p.custom_metric_count:,} custom metrics, "
+                f"{p.alarm_count:,} alarms, {p.dashboard_count:,} dashboards."
+            )
+        if probes.xray is not None:
+            p = probes.xray
+            lines.append(
+                f"- **X-Ray:** {p.traces_received:,.0f} traces received in the last 30d "
+                f"({p.sampling_rules} sampling rules)."
+            )
+        if probes.amp is not None:
+            p = probes.amp
+            lines.append(
+                f"- **Managed Prometheus:** {p.workspace_count} workspaces, "
+                f"{p.ingested_samples:,.0f} samples in last 30d."
+            )
+        if probes.amg is not None:
+            p = probes.amg
+            lines.append(f"- **Managed Grafana:** {p.workspace_count} workspaces.")
+        if probes.opensearch is not None:
+            p = probes.opensearch
+            lines.append(
+                f"- **OpenSearch:** {p.domain_count} domains, "
+                f"{p.total_storage_gb:,.0f} GB provisioned storage."
+            )
+        if probes.vpc_flow_logs is not None:
+            p = probes.vpc_flow_logs
+            dests = ", ".join(f"{k}: {v}" for k, v in p.by_destination.items())
+            lines.append(
+                f"- **VPC Flow Logs:** {p.flow_log_count} flow logs ({dests or 'none'})."
+            )
+        if probes.cloudtrail is not None:
+            p = probes.cloudtrail
+            lines.append(
+                f"- **CloudTrail:** {p.trail_count} trails, "
+                f"{p.trails_with_data_events} with data events, "
+                f"{p.multi_region_trails} multi-region."
+            )
+        if probes.s3_log_sinks is not None:
+            p = probes.s3_log_sinks
+            lines.append(
+                f"- **S3 log-sink candidates:** {p.total_candidates} buckets matching "
+                "log/audit/cloudtrail/flowlog naming heuristics."
+            )
+            for b in p.candidate_buckets[:20]:
+                lines.append(f"  - `{b['name']}` ({b.get('region') or '?'})")
+            if p.total_candidates > 20:
+                lines.append(f"  - …and {p.total_candidates - 20} more")
+        lines.append("")
+
+    # Bronto projection detail
+    lines.append("## Bronto Projection Detail")
+    lines.append("")
+    lines.append(
+        f"_Total ingested volume (from Cost Explorer usage meters): "
+        f"**{projection.gb_ingested:,.1f} GB** over {window_days} days._"
+    )
+    lines.append("")
+    if projection.per_source_gb:
+        lines.append("| Source | GB ingested |")
+        lines.append("| --- | ---: |")
+        for src, gb in sorted(projection.per_source_gb.items(), key=lambda kv: kv[1], reverse=True):
+            lines.append(f"| {src} | {gb:,.1f} |")
+        lines.append("")
+    lines.append("| Plan | Monthly fee | Included | Overage rate | Projected total |")
+    lines.append("| --- | ---: | ---: | ---: | ---: |")
+    for plan in pricing.plans:
+        name = plan["name"]
+        fee = float(plan["monthly_fee_usd"])
+        inc = float(plan["included_tb"])
+        cost = projection.plan_costs.get(name, 0.0)
+        cheapest = " ←" if name == projection.cheapest_plan else ""
+        lines.append(
+            f"| {name}{cheapest} | {_usd(fee)} | {inc} TB/mo | "
+            f"${pricing.ingest_per_gb_usd:.2f}/GB | {_usd(cost)} |"
+        )
+    lines.append("")
+
+    # Caveats
+    lines.append("## Caveats")
+    lines.append("")
+    lines.append(
+        "- S3 spend is reported separately and **not** rolled into observability totals. "
+        "Run with `--probe` to attribute log-sink buckets explicitly."
+    )
+    lines.append("- Bronto search pricing is excluded from this projection per spec.")
+    if projection.extended_retention_note:
+        lines.append(f"- {projection.extended_retention_note}")
+    lines.append(
+        "- OpenSearch ingestion is not metered by Cost Explorer in a usable form; the "
+        "Bronto projection currently treats OpenSearch as compute spend only. Use "
+        "`--probe` to surface storage size."
+    )
+    lines.append(
+        "- Trace and CloudTrail event volumes are converted to GB using configurable "
+        "bytes-per-event assumptions in `config/bronto_pricing.yaml`."
+    )
+    lines.append("")
+    return "\n".join(lines)

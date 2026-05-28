@@ -1,0 +1,29 @@
+# Bronto.io rate card — source: https://bronto.io/pricing (verified 2026-05-28).
+# Pricing is uniform across logs, metrics, and traces — Bronto charges by volume.
+# Search is excluded from this projection per request.
+
+ingest_per_gb_usd: 0.10
+included_retention_months: 12
+
+# Extended retention is "contact sales" — leave null to render a footnote
+# instead of a number. Set to a per-GB-month rate if you have a quote.
+extended_retention_per_gb_month_usd: null
+
+# Search is excluded from this comparison.
+search_per_gb_usd: 0.0
+
+plans:
+  - name: starter
+    monthly_fee_usd: 25
+    included_tb: 1
+  - name: pro
+    monthly_fee_usd: 500
+    included_tb: 5
+  - name: enterprise
+    monthly_fee_usd: 0
+    included_tb: 0   # pure per-GB
+
+# Volume conversion assumptions used when AWS reports counts instead of bytes.
+bytes_per_xray_trace: 2048          # 2 KB / trace
+bytes_per_prometheus_sample: 8      # 8 B / sample
+bytes_per_cloudtrail_event: 1536    # 1.5 KB / event
