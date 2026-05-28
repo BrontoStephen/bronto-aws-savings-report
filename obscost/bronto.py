@@ -78,11 +78,28 @@ class BrontoPricing:
         )
 
 
+SIGNAL_TYPE = {
+    "CloudWatch Logs": "logs",
+    "CloudTrail": "logs",
+    "CloudWatch Metrics": "metrics",
+    "Managed Prometheus": "metrics",
+    "X-Ray": "traces",
+    # OpenSearch can be any of the three — bucket it under "logs" since
+    # that's the most common use case, but flag in caveats.
+    "OpenSearch": "logs",
+}
+
+
+def signal_type(bucket: str) -> str:
+    return SIGNAL_TYPE.get(bucket, "other")
+
+
 @dataclass
 class BrontoProjection:
     gb_ingested: float = 0.0
     gb_searched: float = 0.0
     per_source_gb: dict[str, float] = field(default_factory=dict)
+    per_signal_gb: dict[str, float] = field(default_factory=dict)
     plan_costs: dict[str, float] = field(default_factory=dict)
     plan_ingest_costs: dict[str, float] = field(default_factory=dict)
     plan_search_costs: dict[str, float] = field(default_factory=dict)
@@ -192,6 +209,13 @@ def project(
         proj.gb_ingested += windowed
 
     proj.per_source_gb = per_source
+
+    # Roll up per-source into the three signal types (logs/metrics/traces).
+    per_signal: dict[str, float] = {"logs": 0.0, "metrics": 0.0, "traces": 0.0}
+    for src, gb in per_source.items():
+        sig = signal_type(src)
+        per_signal[sig] = per_signal.get(sig, 0.0) + gb
+    proj.per_signal_gb = per_signal
 
     months = max(proj.months_in_window, 1e-9)
     for plan in pricing.plans:

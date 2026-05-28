@@ -5,7 +5,7 @@ from __future__ import annotations
 from dataclasses import dataclass
 from typing import Optional
 
-from .bronto import BrontoPricing, BrontoProjection, TB_TO_GB
+from .bronto import BrontoPricing, BrontoProjection, TB_TO_GB, signal_type
 from .cost_explorer import CostReport
 from .org import Account
 
@@ -77,6 +77,14 @@ def render(
         lines.append(
             f"  - Ingest: {_usd(ingest_cost)} ({projection.gb_ingested:,.1f} GB) · "
             f"Search: {_usd(search_cost)} ({projection.gb_searched:,.1f} GB scanned)"
+        )
+    if projection.per_signal_gb:
+        sig = projection.per_signal_gb
+        lines.append(
+            f"- **Ingest by signal type:** "
+            f"Logs {sig.get('logs', 0):,.1f} GB · "
+            f"Metrics {sig.get('metrics', 0):,.1f} GB · "
+            f"Traces {sig.get('traces', 0):,.1f} GB"
         )
     if obs_total > 0:
         lines.append(f"- **Projected savings:** {_usd(savings)} ({savings_pct})")
@@ -234,10 +242,14 @@ def render(
         )
     lines.append("")
     if projection.per_source_gb:
-        lines.append("| Source | GB ingested |")
-        lines.append("| --- | ---: |")
+        lines.append("| Signal | Source | GB ingested |")
+        lines.append("| --- | --- | ---: |")
         for src, gb in sorted(projection.per_source_gb.items(), key=lambda kv: kv[1], reverse=True):
-            lines.append(f"| {src} | {gb:,.1f} |")
+            lines.append(f"| {signal_type(src)} | {src} | {gb:,.1f} |")
+        sig = projection.per_signal_gb
+        lines.append(f"| **logs** | **subtotal** | **{sig.get('logs', 0):,.1f}** |")
+        lines.append(f"| **metrics** | **subtotal** | **{sig.get('metrics', 0):,.1f}** |")
+        lines.append(f"| **traces** | **subtotal** | **{sig.get('traces', 0):,.1f}** |")
         lines.append("")
     lines.append(
         "| Plan | Monthly fee | Included ingest | Search allowance | "
