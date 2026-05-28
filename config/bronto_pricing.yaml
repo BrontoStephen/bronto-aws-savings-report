@@ -51,6 +51,20 @@ bytes_per_metric_month: 3_440_000
 # namespace, dimensions, timestamp, and value — ~80 bytes serialized.
 bytes_per_metric_stream_update: 80
 
+# --- Query / scan assumptions (for the Bronto search comparison) ---
+# AWS bills CloudWatch GetMetricData per metric queried, regardless of
+# how many data points the query returns. On Bronto the equivalent is
+# bytes scanned. A typical dashboard query touches ~1 hour of 1-minute
+# resolution data = 60 datapoints × ~80 bytes ≈ 5 KB per metric. Tune
+# upward (toward ~100 KB) if your queries span longer windows.
+bytes_per_metric_query: 5120
+
+# X-Ray trace retrieval/scan — one trace fetched ≈ ingest size of one
+# trace. We reuse bytes_per_xray_trace as the per-query equivalent;
+# if you query against trace summaries only (no full retrieval), tune
+# this lower.
+bytes_per_trace_query: 2048
+
 # OpenSearch monthly ingest is estimated from provisioned storage divided
 # by an assumed retention. AWS doesn't expose ingest bytes directly via CE.
 # Default: assume 30-day retention (storage_gb / 1 month = monthly ingest).

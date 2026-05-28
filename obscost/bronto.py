@@ -51,6 +51,8 @@ class BrontoPricing:
     bytes_per_cloudtrail_event: int
     bytes_per_metric_month: int
     bytes_per_metric_stream_update: int
+    bytes_per_metric_query: int
+    bytes_per_trace_query: int
     opensearch_retention_months_assumption: float
 
     @classmethod
@@ -72,6 +74,8 @@ class BrontoPricing:
             bytes_per_cloudtrail_event=int(data.get("bytes_per_cloudtrail_event", 1536)),
             bytes_per_metric_month=int(data.get("bytes_per_metric_month", 3_440_000)),
             bytes_per_metric_stream_update=int(data.get("bytes_per_metric_stream_update", 80)),
+            bytes_per_metric_query=int(data.get("bytes_per_metric_query", 5120)),
+            bytes_per_trace_query=int(data.get("bytes_per_trace_query", 2048)),
             opensearch_retention_months_assumption=float(
                 data.get("opensearch_retention_months_assumption", 1.0)
             ),
@@ -100,6 +104,7 @@ class BrontoProjection:
     gb_searched: float = 0.0
     per_source_gb: dict[str, float] = field(default_factory=dict)
     per_signal_gb: dict[str, float] = field(default_factory=dict)
+    search_gb_by_signal: dict[str, float] = field(default_factory=dict)
     plan_costs: dict[str, float] = field(default_factory=dict)
     plan_ingest_costs: dict[str, float] = field(default_factory=dict)
     plan_search_costs: dict[str, float] = field(default_factory=dict)
@@ -150,15 +155,25 @@ def _line_to_gb(line: UsageLine, pricing: BrontoPricing) -> float:
     return 0.0
 
 
-def _line_to_search_gb(line: UsageLine) -> float:
-    """GB scanned by CloudWatch Logs Insights queries.
+def _line_to_search_gb(line: UsageLine, pricing: BrontoPricing) -> tuple[float, str]:
+    """Return (GB scanned, signal) for any usage line representing a
+    query/scan that Bronto would bill against its search rate.
 
-    AWS reports this as `*-DataScanned-Bytes` (quantity already in GB).
+    Covers:
+      * CloudWatch Logs Insights — `DataScanned-Bytes` (already GB)
+      * CloudWatch GetMetricData — `CW:GMD-Metrics` (metrics × bytes/query)
+      * X-Ray trace retrieval / scan — `TracesRetrieved`, `TracesScanned`
+        (traces × bytes/query)
     """
     ut = (line.usage_type or "").lower()
+    qty = line.quantity
     if line.bucket == "CloudWatch Insights" and "datascanned" in ut:
-        return line.quantity
-    return 0.0
+        return line.quantity, "logs"
+    if line.bucket == "CloudWatch Metrics" and "gmd-metrics" in ut:
+        return (qty * pricing.bytes_per_metric_query) / GB, "metrics"
+    if line.bucket == "X-Ray" and ("tracesretrieved" in ut or "tracesscanned" in ut):
+        return (qty * pricing.bytes_per_trace_query) / GB, "traces"
+    return 0.0, ""
 
 
 def _search_allowance_gb(plan: dict, gb_ingested: float) -> float:
@@ -189,6 +204,7 @@ def project(
     proj = BrontoProjection(months_in_window=_months_between(report.start, report.end))
 
     per_source: dict[str, float] = {}
+    search_by_signal: dict[str, float] = {"logs": 0.0, "metrics": 0.0, "traces": 0.0}
     for line in report.lines:
         if line.account_id != "*":
             continue
@@ -196,9 +212,14 @@ def project(
         if gb > 0:
             per_source[line.bucket] = per_source.get(line.bucket, 0.0) + gb
             proj.gb_ingested += gb
-        search_gb = _line_to_search_gb(line)
+        search_gb, search_signal = _line_to_search_gb(line, pricing)
         if search_gb > 0:
             proj.gb_searched += search_gb
+            if search_signal:
+                search_by_signal[search_signal] = (
+                    search_by_signal.get(search_signal, 0.0) + search_gb
+                )
+    proj.search_gb_by_signal = search_by_signal
 
     # OpenSearch ingestion estimate from probe data.
     if opensearch_storage_gb > 0:

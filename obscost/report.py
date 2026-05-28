@@ -248,9 +248,13 @@ def render(
         f"**{projection.gb_ingested:,.1f} GB** over {window_days} days._"
     )
     if projection.gb_searched > 0:
+        sbs = projection.search_gb_by_signal
         lines.append(
-            f"_Search/scan volume (CW Logs Insights `DataScanned-Bytes`): "
-            f"**{projection.gb_searched:,.1f} GB** over {window_days} days._"
+            f"_Search/scan volume: **{projection.gb_searched:,.1f} GB** "
+            f"over {window_days} days "
+            f"(Logs {sbs.get('logs', 0):,.1f} · "
+            f"Metrics {sbs.get('metrics', 0):,.1f} · "
+            f"Traces {sbs.get('traces', 0):,.1f})._"
         )
     lines.append("")
     if projection.per_source_gb:
