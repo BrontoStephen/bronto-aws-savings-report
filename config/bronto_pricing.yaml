@@ -27,3 +27,13 @@ plans:
 bytes_per_xray_trace: 2048          # 2 KB / trace
 bytes_per_prometheus_sample: 8      # 8 B / sample
 bytes_per_cloudtrail_event: 1536    # 1.5 KB / event
+
+# CloudWatch custom metrics: 1-min resolution = 43,200 datapoints/month,
+# ~80 bytes/datapoint serialized → ~3.4 MB / metric-month. Tune for your
+# resolution (5-min = 8,640 datapoints = ~700 KB).
+bytes_per_metric_month: 3_440_000
+
+# OpenSearch monthly ingest is estimated from provisioned storage divided
+# by an assumed retention. AWS doesn't expose ingest bytes directly via CE.
+# Default: assume 30-day retention (storage_gb / 1 month = monthly ingest).
+opensearch_retention_months_assumption: 1.0

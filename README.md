@@ -102,11 +102,23 @@ The report includes:
 
 ## Notes & caveats
 
-- S3 spend is reported separately and **not** rolled into observability totals
-  by default. With `--probe`, candidate log-sink buckets are listed by name
-  match heuristics so you can decide what to attribute.
-- Bronto **search** pricing is excluded from the projection per spec.
-- Extended retention beyond 12 months is "contact sales" on Bronto, so the
-  projection footnotes it rather than guessing a number.
-- OpenSearch ingestion is not metered by Cost Explorer in a useful form;
-  `--probe` surfaces domain count and storage size for context.
+- **S3 attribution.** With `--probe`, the script walks every log-producing
+  AWS service (CloudTrail, AWS Config, VPC Flow Logs, Kinesis Firehose, ALB
+  access logs, CloudFront, S3 server access logs) to build a **real**
+  bucket → source map. Buckets without a confirmed source are reported as
+  "suspected" by name match only — useful for spotting omissions but not
+  authoritative. Bucket sizes are pulled from CloudWatch `BucketSizeBytes`.
+- **Bronto savings can look large.** Bronto only charges for ingested
+  bytes — not alarm hours, dashboards, API requests, retention storage
+  beyond 12 months, or OpenSearch node EBS. AWS charges that have no
+  Bronto counterpart show up as net savings even though Bronto isn't
+  "doing less" — it just bills differently.
+- **CloudWatch Metrics conversion** assumes ~3.4 MB/metric-month
+  (1-minute resolution × 80 bytes/datapoint). Tune `bytes_per_metric_month`
+  in `config/bronto_pricing.yaml` for your actual resolution.
+- **OpenSearch ingest** is estimated from provisioned storage ÷
+  `opensearch_retention_months_assumption` (default 1 month). Tune for
+  your real index retention.
+- **Bronto search pricing** is excluded per spec.
+- **Extended retention** beyond 12 months is "contact sales" on Bronto,
+  so it's footnoted rather than estimated.

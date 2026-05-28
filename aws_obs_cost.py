@@ -75,7 +75,7 @@ def _run_probes(session, regions: list[str]):
     bundle.opensearch = opensearch.run(session, regions)
     bundle.vpc_flow_logs = vpc_flow_logs.run(session, regions)
     bundle.cloudtrail = cloudtrail.run(session, regions)
-    bundle.s3_log_sinks = s3_log_sinks.run(session)
+    bundle.s3_log_sinks = s3_log_sinks.run(session, regions)
     return bundle
 
 
@@ -172,8 +172,14 @@ def _merge_bundles(bundles: list[report.ProbeBundle]) -> report.ProbeBundle:
     for b in bundles:
         if not b.s3_log_sinks:
             continue
-        s3.candidate_buckets.extend(b.s3_log_sinks.candidate_buckets)
-        s3.total_candidates += b.s3_log_sinks.total_candidates
+        s3.attributed_buckets.extend(b.s3_log_sinks.attributed_buckets)
+        s3.suspected_buckets.extend(b.s3_log_sinks.suspected_buckets)
+        s3.total_attributed_size_bytes += b.s3_log_sinks.total_attributed_size_bytes
+        s3.total_suspected_size_bytes += b.s3_log_sinks.total_suspected_size_bytes
+        for src, count in b.s3_log_sinks.sources_seen.items():
+            s3.sources_seen[src] = s3.sources_seen.get(src, 0) + count
+    s3.attributed_buckets.sort(key=lambda b: b.size_bytes, reverse=True)
+    s3.suspected_buckets.sort(key=lambda b: b.size_bytes, reverse=True)
     out.s3_log_sinks = s3
 
     return out
@@ -223,7 +229,10 @@ def main(argv: list[str] | None = None) -> int:
             bundles.append(_run_probes(session, regions))
         probe_bundle = _merge_bundles(bundles)
 
-    projection = bronto.project(cost, pricing)
+    opensearch_storage_gb = 0.0
+    if probe_bundle and probe_bundle.opensearch is not None:
+        opensearch_storage_gb = probe_bundle.opensearch.total_storage_gb
+    projection = bronto.project(cost, pricing, opensearch_storage_gb=opensearch_storage_gb)
     log.info("Projected Bronto cost: $%.2f (plan: %s) on %.1f GB ingested",
              projection.cheapest_cost, projection.cheapest_plan, projection.gb_ingested)
 

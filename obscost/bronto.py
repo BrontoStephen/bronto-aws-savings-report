@@ -37,6 +37,8 @@ class BrontoPricing:
     bytes_per_xray_trace: int
     bytes_per_prometheus_sample: int
     bytes_per_cloudtrail_event: int
+    bytes_per_metric_month: int
+    opensearch_retention_months_assumption: float
 
     @classmethod
     def load(cls, path: str | Path) -> "BrontoPricing":
@@ -55,6 +57,10 @@ class BrontoPricing:
             bytes_per_xray_trace=int(data.get("bytes_per_xray_trace", 2048)),
             bytes_per_prometheus_sample=int(data.get("bytes_per_prometheus_sample", 8)),
             bytes_per_cloudtrail_event=int(data.get("bytes_per_cloudtrail_event", 1536)),
+            bytes_per_metric_month=int(data.get("bytes_per_metric_month", 3_440_000)),
+            opensearch_retention_months_assumption=float(
+                data.get("opensearch_retention_months_assumption", 1.0)
+            ),
         )
 
 
@@ -84,7 +90,6 @@ def _line_to_gb(line: UsageLine, pricing: BrontoPricing) -> float:
     API requests, dashboards, alarms, instance hours, etc.).
     """
     ut = (line.usage_type or "").lower()
-    unit = (line.unit or "").lower()
     qty = line.quantity
 
     # CloudWatch Logs ingestion (the dominant cost in most accounts).
@@ -92,6 +97,11 @@ def _line_to_gb(line: UsageLine, pricing: BrontoPricing) -> float:
     if line.bucket == "CloudWatch Logs" and "dataprocessing-bytes" in ut:
         # CE reports this in GB already.
         return qty
+
+    # CloudWatch custom Metrics — billed in metric-months.
+    # Map metric-months to bytes via the per-metric-month assumption.
+    if line.bucket == "CloudWatch Metrics" and "metricmonitor" in ut:
+        return (qty * pricing.bytes_per_metric_month) / GB
 
     # X-Ray traces — count → bytes → GB.
     if line.bucket == "X-Ray" and "tracesrecorded" in ut:
@@ -105,12 +115,22 @@ def _line_to_gb(line: UsageLine, pricing: BrontoPricing) -> float:
     if line.bucket == "CloudTrail" and ("dataevents" in ut or "data-events" in ut):
         return (qty * pricing.bytes_per_cloudtrail_event) / GB
 
-    # OpenSearch — no clean ingestion meter from CE; left to probe.
+    # OpenSearch ingestion is computed separately from probe data (see
+    # project()) since CE doesn't meter it in a useful form.
     return 0.0
 
 
-def project(report: CostReport, pricing: BrontoPricing) -> BrontoProjection:
-    """Convert observability usage into a Bronto cost projection."""
+def project(
+    report: CostReport,
+    pricing: BrontoPricing,
+    opensearch_storage_gb: float = 0.0,
+) -> BrontoProjection:
+    """Convert observability usage into a Bronto cost projection.
+
+    `opensearch_storage_gb` (if provided, typically from --probe) is divided
+    by `opensearch_retention_months_assumption` to estimate monthly ingest,
+    then scaled to the window length.
+    """
     proj = BrontoProjection(months_in_window=_months_between(report.start, report.end))
 
     per_source: dict[str, float] = {}
@@ -123,6 +143,14 @@ def project(report: CostReport, pricing: BrontoPricing) -> BrontoProjection:
             continue
         per_source[line.bucket] = per_source.get(line.bucket, 0.0) + gb
         proj.gb_ingested += gb
+
+    # OpenSearch ingestion estimate from probe data.
+    if opensearch_storage_gb > 0:
+        retention = max(pricing.opensearch_retention_months_assumption, 0.001)
+        monthly_ingest = opensearch_storage_gb / retention
+        windowed = monthly_ingest * proj.months_in_window
+        per_source["OpenSearch"] = per_source.get("OpenSearch", 0.0) + windowed
+        proj.gb_ingested += windowed
 
     proj.per_source_gb = per_source
 

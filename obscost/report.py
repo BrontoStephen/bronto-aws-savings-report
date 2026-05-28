@@ -172,15 +172,45 @@ def render(
             )
         if probes.s3_log_sinks is not None:
             p = probes.s3_log_sinks
+            attrib_gb = p.total_attributed_size_bytes / (1024 ** 3)
+            susp_gb = p.total_suspected_size_bytes / (1024 ** 3)
             lines.append(
-                f"- **S3 log-sink candidates:** {p.total_candidates} buckets matching "
-                "log/audit/cloudtrail/flowlog naming heuristics."
+                f"- **S3 log sinks:** {len(p.attributed_buckets)} buckets attributed to log sources "
+                f"({attrib_gb:,.1f} GB stored); "
+                f"{len(p.suspected_buckets)} additional name-match candidates ({susp_gb:,.1f} GB)."
             )
-            for b in p.candidate_buckets[:20]:
-                lines.append(f"  - `{b['name']}` ({b.get('region') or '?'})")
-            if p.total_candidates > 20:
-                lines.append(f"  - …and {p.total_candidates - 20} more")
+            if p.sources_seen:
+                srcs = ", ".join(f"{k}: {v}" for k, v in sorted(p.sources_seen.items()))
+                lines.append(f"  - Sources detected: {srcs}")
         lines.append("")
+
+        # Dedicated S3 attribution section if we have data.
+        if probes.s3_log_sinks is not None and (probes.s3_log_sinks.attributed_buckets or probes.s3_log_sinks.suspected_buckets):
+            lines.append("### S3 Log-Sink Attribution")
+            lines.append("")
+            if probes.s3_log_sinks.attributed_buckets:
+                lines.append("**Confirmed** (attributed to a specific AWS log source):")
+                lines.append("")
+                lines.append("| Bucket | Region | Size | Source(s) |")
+                lines.append("| --- | --- | ---: | --- |")
+                for b in probes.s3_log_sinks.attributed_buckets[:40]:
+                    size_gb = b.size_bytes / (1024 ** 3)
+                    srcs = "; ".join(sorted(set(b.sources)))
+                    lines.append(f"| `{b.name}` | {b.region or '?'} | {size_gb:,.2f} GB | {srcs} |")
+                if len(probes.s3_log_sinks.attributed_buckets) > 40:
+                    lines.append(f"| _…and {len(probes.s3_log_sinks.attributed_buckets) - 40} more_ |  |  |  |")
+                lines.append("")
+            if probes.s3_log_sinks.suspected_buckets:
+                lines.append("**Suspected** (bucket name matches log heuristics — verify manually):")
+                lines.append("")
+                lines.append("| Bucket | Region | Size |")
+                lines.append("| --- | --- | ---: |")
+                for b in probes.s3_log_sinks.suspected_buckets[:20]:
+                    size_gb = b.size_bytes / (1024 ** 3)
+                    lines.append(f"| `{b.name}` | {b.region or '?'} | {size_gb:,.2f} GB |")
+                if len(probes.s3_log_sinks.suspected_buckets) > 20:
+                    lines.append(f"| _…and {len(probes.s3_log_sinks.suspected_buckets) - 20} more_ |  |  |")
+                lines.append("")
 
     # Bronto projection detail
     lines.append("## Bronto Projection Detail")
@@ -215,15 +245,32 @@ def render(
     lines.append("")
     lines.append(
         "- S3 spend is reported separately and **not** rolled into observability totals. "
-        "Run with `--probe` to attribute log-sink buckets explicitly."
+        "The `S3 (unattributed)` figure includes every S3 bucket in the account — most "
+        "of which are usually product/data buckets, not log sinks. Run with `--probe` "
+        "and read the **S3 Log-Sink Attribution** section above for the real log-sink "
+        "subset."
+    )
+    lines.append(
+        "- Bronto's per-GB projection only counts data Bronto would actually ingest "
+        "(log bytes, metric data points, trace data, CloudTrail events, OpenSearch "
+        "indexed data). AWS charges that Bronto does **not** levy — alarm-monitor "
+        "hours, dashboard fees, API request tiers, retention storage beyond 12 months, "
+        "EBS volumes for OpenSearch nodes — show up as AWS spend with no Bronto "
+        "counterpart, which is why the projected savings can look large."
     )
     lines.append("- Bronto search pricing is excluded from this projection per spec.")
     if projection.extended_retention_note:
         lines.append(f"- {projection.extended_retention_note}")
     lines.append(
-        "- OpenSearch ingestion is not metered by Cost Explorer in a usable form; the "
-        "Bronto projection currently treats OpenSearch as compute spend only. Use "
-        "`--probe` to surface storage size."
+        "- OpenSearch ingest is estimated from probe-reported provisioned storage "
+        "divided by `opensearch_retention_months_assumption` in "
+        "`config/bronto_pricing.yaml` (default: 1 month). Tune for your actual "
+        "index retention."
+    )
+    lines.append(
+        "- CloudWatch custom metrics are converted to GB at "
+        "`bytes_per_metric_month` (default 3.4 MB/metric-month, ~1-min resolution). "
+        "Tune for your actual datapoint resolution."
     )
     lines.append(
         "- Trace and CloudTrail event volumes are converted to GB using configurable "
