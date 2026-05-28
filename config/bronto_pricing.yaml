@@ -24,12 +24,17 @@ plans:
     monthly_fee_usd: 500
     included_tb: 5
     search_included_tb: 500
-  # Enterprise: per-GB ingest; search scales as 100 × the customer's
-  # actual ingested volume in the same window.
+  # Enterprise: pay-as-you-go. $0.10/GB ingest, $1/TB search, no
+  # included allowance on either. Worked example from Bronto:
+  # 1 GB ingest + 300 GB search = $0.10 + $0.30 = $0.40.
+  # Non-price perks (dedicated Slack + TAM, SLA, HIPAA/SOC2 on
+  # request, extendable retention, custom MSA) are listed in the
+  # report caveats but don't affect the dollar projection.
   - name: enterprise
     monthly_fee_usd: 0
     included_tb: 0
-    search_multiplier_of_ingest: 100
+    # no `search_included_tb` and no `search_multiplier_of_ingest`
+    # → projector charges from byte 1 at search_per_gb_usd.
 
 # Volume conversion assumptions used when AWS reports counts instead of bytes.
 bytes_per_xray_trace: 2048          # 2 KB / trace

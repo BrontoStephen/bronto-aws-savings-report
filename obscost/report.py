@@ -257,8 +257,10 @@ def render(
                 f"{plan['search_multiplier_of_ingest']}× ingest "
                 f"({allowance_gb / TB_TO_GB:,.1f} TB)"
             )
-        else:
+        elif allowance_gb > 0:
             allowance_label = f"{allowance_gb / TB_TO_GB:,.0f} TB"
+        else:
+            allowance_label = "— (pay-as-you-go)"
         cheapest = " ←" if name == projection.cheapest_plan else ""
         lines.append(
             f"| {name}{cheapest} | {_usd(fee)} | {inc} TB/mo | {allowance_label} | "
@@ -291,9 +293,14 @@ def render(
         "counterpart, which is why the projected savings can look large."
     )
     lines.append(
-        "- Bronto search inclusion varies per plan: Starter bundles 20 TB, "
-        "Pro bundles 500 TB, Enterprise scales as 100× the customer's actual "
-        "ingested volume. Overage on any plan is $1/TB."
+        "- Bronto search inclusion: Starter bundles 20 TB, Pro bundles 500 TB, "
+        "Enterprise is pay-as-you-go ($0.10/GB ingest + $1/TB search from byte 1, "
+        "no inclusion). Overage on Starter/Pro is $1/TB. Cheapest plan wins."
+    )
+    lines.append(
+        "- Enterprise tier adds non-price perks not captured in this projection: "
+        "dedicated Slack channel + TAM, SLA guarantee, custom MSA, HIPAA/SOC2 "
+        "on request, extendable retention beyond 12 months."
     )
     if projection.extended_retention_note:
         lines.append(f"- {projection.extended_retention_note}")
