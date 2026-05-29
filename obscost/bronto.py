@@ -3,23 +3,50 @@
 Pricing source: https://bronto.io/pricing
   - Ingest: $0.10/GB, uniform across logs, metrics, and traces.
   - Retention: 12 months included on all plans.
-  - Search: included on every plan (Starter 20 TB flat, Pro 500 TB flat,
-    Enterprise 100× ingested), overage at $1/TB.
+  - Search: per-plan (Starter 20 TB, Pro 500 TB, Enterprise pay-go),
+    overage $1/TB.
 
-We convert AWS Cost Explorer usage quantities into a single 'GB ingested'
-number and a separate 'GB searched' number, then project the cost across
-all three plans. Cheapest total (ingest + search) wins.
+Apples-to-apples comparison
+---------------------------
+The naive "AWS bill vs Bronto bill" comparison overstates savings because
+some AWS charges survive a migration. We split bucket totals into:
+
+  * **Floor** (survives migration) — CloudWatch MetricStream (egress
+    from CW Metrics — same fee whether destination is Bronto, Datadog,
+    S3) and Kinesis/Data Firehose (transport for MetricStream → Bronto).
+  * **Displaceable** — everything else. OpenSearch is displaceable:
+    Bronto absorbs log-search / SIEM / time-series-analytics workloads.
+    Vector / RAG / e-commerce search are exceptions called out in
+    caveats — apply judgment.
+
+Apples-to-apples savings = AWS_total_forward − (AWS_floor + Bronto).
+
+Decommissioned services
+-----------------------
+Any service with spend in the analysis window but $0 in a trailing-7-day
+probe is flagged decommissioned and excluded from the forward-looking
+baseline. See `detect_decommissioned()`.
+
+OpenSearch displacement scenarios
+---------------------------------
+Cost Explorer doesn't expose OpenSearch ingest GB. `opensearch_footprint()`
+backs out cluster shape from CE line items; `opensearch_scenarios()`
+projects Bronto cost across retention assumptions (7/14/30/90d) using
+AWS's published sizing rules. This repo also runs direct OpenSearch
+probes (see obscost.probes.opensearch) when `--probe` is set.
 
 Ingest sources (Cost Explorer usage types):
   * CloudWatch Logs: DataProcessing-Bytes (customer), VendedLog-Bytes (ALB/CF/etc.)
   * CloudWatch custom metrics: MetricMonitorUsage (metric-months)
-  * CloudWatch Metric Streams: MetricStreamUsage (per metric update)
+  * CloudWatch MetricStream (floor): MetricStreamUsage (per metric update)
   * X-Ray: TracesRecorded
   * Managed Prometheus: IngestedSamples
   * CloudTrail: PaidEventsRecorded (data events)
   * OpenSearch: estimated from --probe storage size (CE doesn't meter ingest)
+  * Firehose (floor): transport bytes
 
-Search source: CloudWatch Logs Insights `DataScanned-Bytes`.
+Search sources: CW Logs Insights DataScanned-Bytes; CW GMD-Metrics;
+X-Ray TracesRetrieved/Scanned.
 """
 
 from __future__ import annotations
@@ -86,16 +113,200 @@ SIGNAL_TYPE = {
     "CloudWatch Logs": "logs",
     "CloudTrail": "logs",
     "CloudWatch Metrics": "metrics",
+    "CloudWatch MetricStream (floor)": "metrics",
     "Managed Prometheus": "metrics",
     "X-Ray": "traces",
     # OpenSearch can be any of the three — bucket it under "logs" since
     # that's the most common use case, but flag in caveats.
     "OpenSearch": "logs",
+    "Firehose (floor)": "metrics",
 }
 
 
 def signal_type(bucket: str) -> str:
     return SIGNAL_TYPE.get(bucket, "other")
+
+
+# AWS-side cost surfaces that survive a Bronto migration. The bytes still
+# flow into Bronto (so they DO contribute to gb_ingested), but the fee is
+# unavoidable on the AWS side — keep them on the AWS plate in the
+# apples-to-apples comparison.
+FLOOR_BUCKETS = frozenset({
+    "CloudWatch MetricStream (floor)",
+    "Firehose (floor)",
+})
+
+
+# Map AWS Service dimension → buckets we'd consider decommissioned if
+# the service has $0 spend in the trailing window. We deliberately omit
+# Amazon CloudWatch and Amazon S3 — too broad; false positives would
+# distort the report.
+SERVICE_TO_BUCKETS = {
+    "Amazon OpenSearch Service": ["OpenSearch"],
+    "AWS X-Ray": ["X-Ray"],
+    "Amazon Managed Service for Prometheus": ["Managed Prometheus"],
+    "Amazon Managed Grafana": ["Managed Grafana"],
+    "AWS CloudTrail": ["CloudTrail"],
+    "Amazon Kinesis Firehose": ["Firehose (floor)"],
+    "Amazon Data Firehose": ["Firehose (floor)"],
+}
+
+
+def detect_decommissioned(
+    bucket_cost: dict[str, float],
+    recent_spend_by_service: dict[str, float],
+) -> set[str]:
+    """Return the set of buckets whose upstream AWS service had spend in
+    the analysis window but $0 in the trailing-7-day probe."""
+    decom: set[str] = set()
+    for svc, buckets in SERVICE_TO_BUCKETS.items():
+        if recent_spend_by_service.get(svc, 0.0) > 0:
+            continue
+        for b in buckets:
+            if bucket_cost.get(b, 0.0) > 0:
+                decom.add(b)
+    return decom
+
+
+# --- OpenSearch displacement analysis ----------------------------------
+# Published us-east-1 OpenSearch search-node rates (on-demand).
+# Source: https://aws.amazon.com/opensearch-service/pricing/
+_OS_INSTANCE_RATES_USD_PER_HR = {
+    "r6g.large": 0.154,
+    "r6g.xlarge": 0.335,
+    "r6g.2xlarge": 0.670,
+    "m6g.large": 0.142,
+    "m6g.xlarge": 0.284,
+    "c6g.large": 0.126,
+    "c6g.xlarge": 0.252,
+    "t3.small": 0.036,
+    "t3.medium": 0.073,
+}
+_OS_GP3_RATE_USD_PER_GB_MO = 0.122
+_OS_GP2_RATE_USD_PER_GB_MO = 0.135
+
+# Sizing constants from AWS pricing examples + general OpenSearch ops guidance.
+_OS_FREE_SPACE_HEADROOM = 0.85      # OS reserves 15% for disk-full safety
+_OS_LUCENE_OVERHEAD = 0.91          # ~10% indexing overhead vs raw
+_OS_TYPICAL_UTILIZATION = 0.80      # clusters don't run at 100% full
+
+
+@dataclass
+class OpenSearchFootprint:
+    instance_type: str | None
+    instance_hours: float
+    instance_rate: float
+    node_days: float
+    ebs_type: str | None
+    ebs_gb_months: float
+    ebs_rate: float
+    ebs_gb_provisioned: float
+
+
+@dataclass
+class OpenSearchScenario:
+    retention_days: int
+    raw_resident_gb: float
+    ingest_per_day_gb: float
+    ingest_over_window_gb: float
+    fits_in_starter: bool
+    incremental_bronto_cost: float
+
+
+@dataclass
+class OpenSearchDisplacement:
+    footprint: OpenSearchFootprint
+    raw_resident_gb: float
+    usable_gb: float
+    scenarios: list[OpenSearchScenario]
+
+
+def opensearch_footprint(report: CostReport) -> OpenSearchFootprint | None:
+    """Back out OpenSearch cluster shape from Cost Explorer line items."""
+    inst_lines: dict[str, dict[str, float]] = {}
+    ebs_lines: dict[str, dict[str, float]] = {}
+    for line in report.lines:
+        if line.account_id != "*" or line.bucket != "OpenSearch":
+            continue
+        utl = (line.usage_type or "").lower()
+        if "esinstance:" in utl:
+            inst_type = line.usage_type.split(":", 1)[1].lower()
+            d = inst_lines.setdefault(inst_type, {"cost": 0.0, "hours": 0.0})
+            d["cost"] += line.amount_usd
+            d["hours"] += line.quantity
+        elif "gp3-storage" in utl:
+            d = ebs_lines.setdefault("gp3", {"cost": 0.0, "gb_months": 0.0})
+            d["cost"] += line.amount_usd
+            d["gb_months"] += line.quantity
+        elif "gp2" in utl and "storage" in utl:
+            d = ebs_lines.setdefault("gp2", {"cost": 0.0, "gb_months": 0.0})
+            d["cost"] += line.amount_usd
+            d["gb_months"] += line.quantity
+
+    if not inst_lines and not ebs_lines:
+        return None
+
+    primary_inst = max(inst_lines.items(), key=lambda kv: kv[1]["cost"], default=(None, None))
+    primary_ebs = max(ebs_lines.items(), key=lambda kv: kv[1]["cost"], default=(None, None))
+    months = _months_between(report.start, report.end) or 1.0
+
+    fp = OpenSearchFootprint(
+        instance_type=primary_inst[0],
+        instance_hours=0.0,
+        instance_rate=0.0,
+        node_days=0.0,
+        ebs_type=primary_ebs[0],
+        ebs_gb_months=0.0,
+        ebs_rate=0.0,
+        ebs_gb_provisioned=0.0,
+    )
+    if primary_inst[0]:
+        fp.instance_hours = primary_inst[1]["hours"]
+        fp.instance_rate = _OS_INSTANCE_RATES_USD_PER_HR.get(
+            primary_inst[0],
+            (primary_inst[1]["cost"] / primary_inst[1]["hours"]) if primary_inst[1]["hours"] > 0 else 0.0,
+        )
+        fp.node_days = primary_inst[1]["hours"] / 24
+    if primary_ebs[0]:
+        fp.ebs_gb_months = primary_ebs[1]["gb_months"]
+        fp.ebs_rate = _OS_GP3_RATE_USD_PER_GB_MO if primary_ebs[0] == "gp3" else _OS_GP2_RATE_USD_PER_GB_MO
+        fp.ebs_gb_provisioned = primary_ebs[1]["gb_months"] / months
+    return fp
+
+
+def opensearch_scenarios(
+    fp: OpenSearchFootprint,
+    gb_ingested_other: float,
+    starter_included_ingest_gb: float,
+    window_days: int,
+) -> OpenSearchDisplacement | None:
+    """Project Bronto incremental cost to absorb OpenSearch at retention 7/14/30/90d.
+    Assumes single-node domain (0 replicas)."""
+    if not fp or fp.ebs_gb_provisioned <= 0:
+        return None
+    usable_gb = fp.ebs_gb_provisioned * _OS_FREE_SPACE_HEADROOM * _OS_LUCENE_OVERHEAD
+    raw_resident_gb = usable_gb * _OS_TYPICAL_UTILIZATION
+    scenarios: list[OpenSearchScenario] = []
+    for retention_days in (7, 14, 30, 90):
+        ingest_per_day = raw_resident_gb / retention_days
+        ingest_over_window = ingest_per_day * window_days
+        remaining_headroom = starter_included_ingest_gb - gb_ingested_other
+        overage_gb = max(0.0, ingest_over_window - remaining_headroom)
+        incremental_cost = overage_gb * 0.10
+        scenarios.append(OpenSearchScenario(
+            retention_days=retention_days,
+            raw_resident_gb=raw_resident_gb,
+            ingest_per_day_gb=ingest_per_day,
+            ingest_over_window_gb=ingest_over_window,
+            fits_in_starter=(overage_gb == 0.0),
+            incremental_bronto_cost=incremental_cost,
+        ))
+    return OpenSearchDisplacement(
+        footprint=fp,
+        raw_resident_gb=raw_resident_gb,
+        usable_gb=usable_gb,
+        scenarios=scenarios,
+    )
 
 
 @dataclass
@@ -113,6 +324,22 @@ class BrontoProjection:
     cheapest_cost: float = 0.0
     months_in_window: float = 0.0
     extended_retention_note: str | None = None
+
+    # --- Apples-to-apples comparison fields ---
+    obs_total_as_billed: float = 0.0
+    obs_total_forward: float = 0.0
+    decommissioned: set[str] = field(default_factory=set)
+    decom_spend: float = 0.0
+    aws_floor: float = 0.0
+    aws_floor_historical: float = 0.0
+    displaceable: float = 0.0
+    post_migration_cost: float = 0.0
+    apples_savings_abs: float = 0.0
+    apples_savings_pct: float = 0.0
+    naive_savings_abs: float = 0.0
+    naive_savings_pct: float = 0.0
+
+    os_displacement: OpenSearchDisplacement | None = None
 
 
 def _months_between(start: str, end: str) -> float:
@@ -139,9 +366,10 @@ def _line_to_gb(line: UsageLine, pricing: BrontoPricing) -> float:
         # Custom metrics published (metric-months).
         if "metricmonitor" in ut:
             return (qty * pricing.bytes_per_metric_month) / GB
-        # Metric Streams forwarding (per metric update — Bronto-equivalent
-        # since this is what you'd send if you routed metrics to Bronto
-        # directly instead of via Streams + Firehose).
+    if line.bucket == "CloudWatch MetricStream (floor)":
+        # Metric Streams forwarding (per metric update). The AWS-side fee
+        # is unavoidable (it's the floor) but the bytes themselves still
+        # flow into Bronto, so they count toward gb_ingested.
         if "metricstream" in ut:
             return (qty * pricing.bytes_per_metric_stream_update) / GB
     if line.bucket == "X-Ray" and "tracesrecorded" in ut:
@@ -190,12 +418,19 @@ def project(
     report: CostReport,
     pricing: BrontoPricing,
     opensearch_storage_gb: float = 0.0,
+    recent_spend_by_service: dict[str, float] | None = None,
 ) -> BrontoProjection:
     """Convert observability usage into a Bronto cost projection.
 
     `opensearch_storage_gb` (if provided, typically from --probe) is divided
     by `opensearch_retention_months_assumption` to estimate monthly ingest,
-    then scaled to the window length.
+    then scaled to the window length. Contributes to the OpenSearch row
+    in `per_source_gb` and to `gb_ingested`.
+
+    `recent_spend_by_service` (from `fetch_recent_spend_by_service`) drives
+    the decommissioned-service detection and the forward-looking baseline.
+    Without it, the apples-to-apples fields use the full-window total
+    (no decom carve-out).
 
     Each plan has its own search inclusion model (flat TB or multiplier on
     ingested volume). Search overage is uniformly `search_per_gb_usd`.
@@ -265,4 +500,56 @@ def project(
             "Extended retention (>12 months) priced via 'contact sales' — "
             "not included in projection."
         )
+
+    # --- Apples-to-apples comparison ---------------------------------------
+    bucket_cost = report.by_bucket()
+    proj.obs_total_as_billed = sum(
+        c for b, c in bucket_cost.items() if b != "S3 (unattributed)"
+    )
+
+    if recent_spend_by_service is not None:
+        proj.decommissioned = detect_decommissioned(bucket_cost, recent_spend_by_service)
+    proj.decom_spend = sum(c for b, c in bucket_cost.items() if b in proj.decommissioned)
+    proj.obs_total_forward = proj.obs_total_as_billed - proj.decom_spend
+
+    proj.aws_floor_historical = sum(
+        c for b, c in bucket_cost.items() if b in FLOOR_BUCKETS
+    )
+    proj.aws_floor = sum(
+        c for b, c in bucket_cost.items()
+        if b in FLOOR_BUCKETS and b not in proj.decommissioned
+    )
+    proj.displaceable = max(proj.obs_total_forward - proj.aws_floor, 0.0)
+    proj.post_migration_cost = proj.aws_floor + proj.cheapest_cost
+    proj.apples_savings_abs = proj.obs_total_forward - proj.post_migration_cost
+    proj.apples_savings_pct = (
+        (proj.apples_savings_abs / proj.obs_total_forward * 100.0)
+        if proj.obs_total_forward > 0
+        else 0.0
+    )
+    proj.naive_savings_abs = proj.obs_total_as_billed - proj.cheapest_cost
+    proj.naive_savings_pct = (
+        (proj.naive_savings_abs / proj.obs_total_as_billed * 100.0)
+        if proj.obs_total_as_billed > 0
+        else 0.0
+    )
+
+    # OpenSearch displacement — derived from CE line items. The sibling
+    # repo's --probe results are surfaced separately in the report renderer.
+    fp = opensearch_footprint(report)
+    if fp is not None:
+        headroom_plan = next(
+            (p for p in pricing.plans if float(p.get("included_tb", 0)) > 0),
+            None,
+        )
+        if headroom_plan:
+            included_ingest_gb = float(headroom_plan["included_tb"]) * TB_TO_GB * months
+            window_days = int(round(proj.months_in_window * 30.4375))
+            proj.os_displacement = opensearch_scenarios(
+                fp,
+                gb_ingested_other=proj.gb_ingested,
+                starter_included_ingest_gb=included_ingest_gb,
+                window_days=max(window_days, 1),
+            )
+
     return proj

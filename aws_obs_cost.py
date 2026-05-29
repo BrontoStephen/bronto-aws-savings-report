@@ -214,6 +214,28 @@ def main(argv: list[str] | None = None) -> int:
     log.info("Cost Explorer returned %d usage lines across %d account(s)",
              len(cost.lines), len(cost.accounts_seen))
 
+    # Firehose is the transport layer for CW MetricStream → Bronto. Pulled
+    # as a separate CE call (different service dimension) and merged into
+    # the main report's lines so Firehose (floor) appears in per-bucket totals.
+    firehose_lines = cost_explorer.fetch_firehose_costs(
+        mgmt_session=oc._mgmt_session,
+        start=args.start,
+        end=args.end,
+        account_ids=[a.id for a in accounts] if filter_ids else None,
+    )
+    if firehose_lines:
+        cost.lines.extend(firehose_lines)
+        log.info("Firehose CE query: %d additional usage lines", len(firehose_lines))
+
+    # Trailing-7-day probe to detect decommissioned services.
+    recent_spend = cost_explorer.fetch_recent_spend_by_service(
+        mgmt_session=oc._mgmt_session,
+        days=7,
+        account_ids=[a.id for a in accounts] if filter_ids else None,
+    )
+    decom_active = [s for s, v in recent_spend.items() if v > 0]
+    log.info("Trailing-7d probe: %d services with non-zero spend", len(decom_active))
+
     skipped: list[tuple[str, str]] = []
     probe_bundle: report.ProbeBundle | None = None
     if args.probe:
@@ -232,9 +254,19 @@ def main(argv: list[str] | None = None) -> int:
     opensearch_storage_gb = 0.0
     if probe_bundle and probe_bundle.opensearch is not None:
         opensearch_storage_gb = probe_bundle.opensearch.total_storage_gb
-    projection = bronto.project(cost, pricing, opensearch_storage_gb=opensearch_storage_gb)
-    log.info("Projected Bronto cost: $%.2f (plan: %s) on %.1f GB ingested",
-             projection.cheapest_cost, projection.cheapest_plan, projection.gb_ingested)
+    projection = bronto.project(
+        cost, pricing,
+        opensearch_storage_gb=opensearch_storage_gb,
+        recent_spend_by_service=recent_spend,
+    )
+    log.info(
+        "Projected Bronto cost: $%.2f (plan: %s) on %.1f GB ingested; "
+        "apples-to-apples savings $%.2f (%.1f%%)",
+        projection.cheapest_cost, projection.cheapest_plan, projection.gb_ingested,
+        projection.apples_savings_abs, projection.apples_savings_pct,
+    )
+    if projection.decommissioned:
+        log.info("Decommissioned: %s", ", ".join(sorted(projection.decommissioned)))
 
     md = report.render(
         report=cost,
