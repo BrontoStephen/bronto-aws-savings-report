@@ -336,8 +336,6 @@ class BrontoProjection:
     post_migration_cost: float = 0.0
     apples_savings_abs: float = 0.0
     apples_savings_pct: float = 0.0
-    naive_savings_abs: float = 0.0
-    naive_savings_pct: float = 0.0
 
     os_displacement: OpenSearchDisplacement | None = None
 
@@ -525,12 +523,6 @@ def project(
     proj.apples_savings_pct = (
         (proj.apples_savings_abs / proj.obs_total_forward * 100.0)
         if proj.obs_total_forward > 0
-        else 0.0
-    )
-    proj.naive_savings_abs = proj.obs_total_as_billed - proj.cheapest_cost
-    proj.naive_savings_pct = (
-        (proj.naive_savings_abs / proj.obs_total_as_billed * 100.0)
-        if proj.obs_total_as_billed > 0
         else 0.0
     )
 

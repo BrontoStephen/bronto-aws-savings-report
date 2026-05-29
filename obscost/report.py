@@ -1,4 +1,14 @@
-"""Markdown report renderer."""
+"""Markdown report renderer.
+
+Layout: blockquote callout → full Executive Summary (top bookend) →
+spend tables → projection detail → caveats → TL;DR Executive Summary
+(bottom bookend, mirrors the headline so a reader who scrolls down
+still sees the savings figure).
+
+Annualized savings = window savings × (365 / window_days). Always
+paired with a disclaimer about not modeling company growth, retention
+changes, or workload shifts.
+"""
 
 from __future__ import annotations
 
@@ -14,6 +24,18 @@ from .bronto import (
 )
 from .cost_explorer import CostReport
 from .org import Account
+
+
+ANNUALIZATION_DISCLAIMER = (
+    "Extrapolated from current usage; does not account for company "
+    "growth, retention changes, or workload shifts."
+)
+
+
+def _annualized(savings_abs: float, window_days: int) -> float:
+    if window_days <= 0:
+        return 0.0
+    return savings_abs * (365.0 / window_days)
 
 
 def _bucket_status(bucket: str, decommissioned: set[str]) -> str:
@@ -76,6 +98,8 @@ def render(
     )
     lines.append("")
 
+    annualized_savings = _annualized(projection.apples_savings_abs, window_days)
+
     # Lead with apples-to-apples forward-looking savings.
     if obs_total_forward > 0:
         callout = (
@@ -89,7 +113,8 @@ def render(
             callout += f" (excludes {_usd(projection.decom_spend)} of decommissioned services)"
         callout += (
             f". Unavoidable AWS-side floor: **{_usd(projection.aws_floor)}** "
-            "(MetricStream + Firehose)."
+            f"(MetricStream + Firehose). "
+            f"**Projected annual savings: {_usd(annualized_savings)}/year (extrapolated)**."
         )
         lines.append(callout)
         lines.append("")
@@ -110,6 +135,10 @@ def render(
             f"- **Projected savings (forward-looking, apples-to-apples):** "
             f"{_usd(projection.apples_savings_abs)} "
             f"({projection.apples_savings_pct:.1f}%)"
+        )
+        lines.append(
+            f"- **Projected annual savings**: {_usd(annualized_savings)}/year "
+            f"_({ANNUALIZATION_DISCLAIMER})_"
         )
     lines.append(
         f"- AWS observability spend, as-billed over {window_days} days: "
@@ -157,13 +186,6 @@ def render(
             f"Metrics {sig.get('metrics', 0):,.1f} GB · "
             f"Traces {sig.get('traces', 0):,.1f} GB "
             f"(total **{projection.gb_ingested:,.1f} GB**)"
-        )
-    if obs_total > 0:
-        lines.append(
-            f"- _For reference, naive savings ignoring AWS floor: "
-            f"{_usd(projection.naive_savings_abs)} "
-            f"({projection.naive_savings_pct:.1f}%) — overstated because it assumes "
-            "Bronto displaces MetricStream/Firehose._"
         )
     if s3_unattr > 0:
         lines.append(
@@ -629,6 +651,17 @@ def render(
         "EBS volumes for OpenSearch nodes — show up as AWS spend with no Bronto "
         "counterpart, which is why the projected savings can look large."
     )
+    alarms_plus_dashboards = (
+        by_bucket.get("CloudWatch Alarms", 0.0)
+        + by_bucket.get("CloudWatch Dashboards", 0.0)
+    )
+    if alarms_plus_dashboards > 0:
+        lines.append(
+            f"- **Transition overlap**: if you keep CloudWatch Alarms/Dashboards "
+            f"running in parallel during the migration, add up to "
+            f"**{_usd(alarms_plus_dashboards)}** back onto the post-migration total "
+            f"until they're cut over."
+        )
     lines.append(
         "- Bronto search inclusion: Starter bundles 20 TB, Pro bundles 500 TB, "
         "Enterprise is pay-as-you-go ($0.10/GB ingest + $1/TB search from byte 1, "
@@ -664,4 +697,26 @@ def render(
         "bytes-per-event assumptions in `config/bronto_pricing.yaml`."
     )
     lines.append("")
+
+    # TL;DR Executive Summary (bookend) — mirrors the headline so a reader
+    # who scrolls to the bottom doesn't have to scroll back to the top.
+    lines.append("## TL;DR — Cost Savings")
+    lines.append("")
+    if obs_total_forward > 0:
+        lines.append(
+            f"- **Apples-to-apples savings**: {_usd(projection.apples_savings_abs)} "
+            f"({projection.apples_savings_pct:.1f}%) over {window_days} days."
+        )
+        lines.append(
+            f"- **Annualized**: {_usd(annualized_savings)}/year "
+            f"_({ANNUALIZATION_DISCLAIMER})_"
+        )
+        if projection.cheapest_plan:
+            lines.append(
+                f"- **Winning Bronto plan**: {projection.cheapest_plan} "
+                f"({_usd(bronto_total)} over the window)."
+            )
+        lines.append("")
+        lines.append("_Detailed assumptions in caveats above._")
+        lines.append("")
     return "\n".join(lines)
