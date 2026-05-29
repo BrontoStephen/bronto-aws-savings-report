@@ -2,11 +2,25 @@
 
 A Python CLI that walks your AWS Organization, totals every dollar AWS bills
 for observability (CloudWatch, X-Ray, AMP/AMG, OpenSearch, VPC Flow Logs,
-CloudTrail data events, plus S3 log sinks), then projects what the same
-ingested volume would cost on [Bronto.io](https://bronto.io/pricing):
+CloudTrail data events, Kinesis Firehose, plus S3 log sinks), then projects
+what the same ingested volume would cost on [Bronto.io](https://bronto.io/pricing):
 $0.10/GB ingest with 12-month retention bundled, plus per-plan search
-allowances (Starter 20 TB / Pro 500 TB / Enterprise 100× ingest) with
+allowances (Starter 20 TB / Pro 500 TB / Enterprise pay-as-you-go) with
 $1/TB overage.
+
+The comparison is **apples-to-apples**: AWS charges that survive a Bronto
+migration (CloudWatch MetricStream + Kinesis Firehose — the "floor") stay
+on the AWS side. Only displaceable spend gets replaced by the Bronto plan.
+Services silent in the trailing 7 days are flagged as decommissioned and
+excluded from the forward-looking baseline.
+
+OpenSearch is displaceable for log-search / SIEM / time-series workloads;
+vector / RAG / application search are the exceptions. The OpenSearch
+displacement section estimates Bronto incremental cost across retention
+scenarios using AWS's [published pricing examples](https://aws.amazon.com/opensearch-service/pricing/)
+to size the cluster from CE line items. With `--probe`, direct
+`opensearch list-domain-names` / `cloudwatch list-metrics --namespace AWS/ES`
+attempts are made and corroborated in the report.
 
 > Looking for a stripped-down sibling that just reads the Cost Explorer
 > bill — no probes, no regional walks? See
