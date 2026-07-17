@@ -16,6 +16,9 @@ env/
 report.md
 *.report.md
 
+# Claude Code local state
+.claude/
+
 # Editor / OS
 .DS_Store
 .idea/

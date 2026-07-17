@@ -31,7 +31,7 @@ from typing import Iterable
 
 import boto3
 
-from .common import for_regions, safe
+from .common import safe
 
 log = logging.getLogger(__name__)
 
