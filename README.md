@@ -8,11 +8,11 @@ side; only displaceable spend is replaced by the Bronto plan.
 
 ## How to run this — three options
 
-### 1. Recommended — use [PROMPT.md](https://github.com/BrontoStephen/aws-observability-bill-vs-bronto/blob/main/PROMPT.md) with any LLM coding agent
+### 1. Recommended — use [PROMPT.md](https://github.com/bronto-community/aws-observability-bill-vs-bronto/blob/main/PROMPT.md) with any LLM coding agent
 
-Paste the sibling repo's [PROMPT.md](https://github.com/BrontoStephen/aws-observability-bill-vs-bronto/blob/main/PROMPT.md)
-into [Claude Code](https://claude.com/claude-code),
-[OpenAI Codex CLI](https://github.com/openai/codex-cli),
+Paste the sibling repo's [PROMPT.md](https://github.com/bronto-community/aws-observability-bill-vs-bronto/blob/main/PROMPT.md)
+into [Claude Code](https://claude.com/product/claude-code),
+[OpenAI Codex CLI](https://github.com/openai/codex),
 [Google Antigravity](https://antigravity.google), or any LLM agent with
 AWS CLI access. The LLM runs `aws ce` calls directly and produces the
 same Markdown report — **and you can keep going from there**: pivot
@@ -22,7 +22,7 @@ ask "why is X so high?". A fixed script can't do that. A prompt can.
 ### 2. No LLM available? Run the CE-only Python.
 
 Either this repo without `--probe`, or the dedicated sibling repo
-[`aws-observability-bill-vs-bronto`](https://github.com/BrontoStephen/aws-observability-bill-vs-bronto)
+[`aws-observability-bill-vs-bronto`](https://github.com/bronto-community/aws-observability-bill-vs-bronto)
 which is the same code minus the probes. Fast, deterministic, no
 regional walks. Same output structure as option 1.
 
@@ -207,3 +207,7 @@ All bytes-per-unit assumptions live in
   your real index retention.
 - **Extended retention** beyond 12 months is "contact sales" on Bronto,
   so it's footnoted rather than estimated.
+
+## License
+
+Licensed under the [Apache License 2.0](LICENSE).
